@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Orchestrator runtime state
+orchestrator/state.json
+orchestrator/logs/*.log
+orchestrator/workspace/*
+!orchestrator/workspace/.gitkeep
+!orchestrator/logs/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
