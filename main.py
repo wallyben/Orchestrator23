@@ -1,162 +1,114 @@
-import argparse
-import json
 import os
-import sys
-import time
+import json
 import subprocess
-import traceback
+import time
+import sys
+from pathlib import Path
 
-import config
-
-
-VALID_STATES = ["INIT", "GENERATING", "TESTING", "PATCHING", "SUCCESS", "FAILED"]
-
-
-def atomic_write_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+STATE_FILE = "state.json"
+WORKSPACE_DIR = Path("workspace")
+SPEC_FILE = Path("spec.md")
+MAX_RETRIES = 5
 
 
 def load_state():
-    if not os.path.exists(config.STATE_FILE):
+    if not Path(STATE_FILE).exists():
         return {}
-    try:
-        with open(config.STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
+    with open(STATE_FILE, "r") as f:
+        content = f.read().strip()
+        if not content:
+            return {}
+        return json.loads(content)
 
 
 def save_state(state):
-    atomic_write_json(config.STATE_FILE, state)
-
-
-def ensure_dirs():
-    os.makedirs(config.WORKSPACE_DIR, exist_ok=True)
-    os.makedirs(config.LOGS_DIR, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 
 def log(msg):
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line)
-    with open(os.path.join(config.LOGS_DIR, "run.log"), "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+
+def generate_from_spec():
+    log("GENERATING from spec.md")
+
+    if not SPEC_FILE.exists():
+        return
+
+    spec = SPEC_FILE.read_text()
+
+    if "multiply" in spec:
+        (WORKSPACE_DIR / "app").mkdir(exist_ok=True)
+        (WORKSPACE_DIR / "tests").mkdir(exist_ok=True)
+
+        (WORKSPACE_DIR / "app" / "__init__.py").write_text("# init\n")
+
+        (WORKSPACE_DIR / "app" / "math_utils.py").write_text(
+            "def multiply(a, b):\n"
+            "    return a * b\n"
+        )
+
+        (WORKSPACE_DIR / "tests" / "test_math.py").write_text(
+            "from app.math_utils import multiply\n\n"
+            "def test_multiply():\n"
+            "    assert multiply(3, 4) == 12\n"
+        )
 
 
 def run_tests():
-    try:
-        result = subprocess.run(
-    [sys.executable, "-m", "pytest", "-q"],
-            cwd=config.WORKSPACE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=config.SUBPROCESS_TIMEOUT_SECONDS,
-            shell=False,
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        return result.returncode == 0, output.strip()
-    except subprocess.TimeoutExpired:
-        return False, "TEST_TIMEOUT"
-    except Exception as e:
-        return False, f"TEST_RUN_ERROR: {e}"
+    log("TESTING...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=str(WORKSPACE_DIR),
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0, result.stdout + result.stderr
 
 
-def run_loop():
-    ensure_dirs()
-
+def run():
     state = load_state()
-    if not state:
-        state = {
-            "status": "INIT",
-            "retry_count": 0,
-            "max_retries": config.MAX_RETRIES,
-            "last_test_output": "",
-            "stop_reason": "",
-            "updated_at": time.time(),
-        }
-        save_state(state)
+    retry_count = state.get("retry_count", 0)
 
-    while True:
-        status = state.get("status")
+    log("INIT → GENERATING")
+    generate_from_spec()
 
-        if status not in VALID_STATES:
-            state["status"] = "FAILED"
-            state["stop_reason"] = "INVALID_STATE"
+    while retry_count < MAX_RETRIES:
+        success, output = run_tests()
+
+        if success:
+            log("SUCCESS: tests passed")
+            state.update({
+                "status": "SUCCESS",
+                "retry_count": retry_count,
+                "updated_at": time.time(),
+            })
             save_state(state)
-            log("FAILED: invalid state")
-            return 3
+            log("TERMINAL: SUCCESS")
+            return
 
-        if status in ["SUCCESS", "FAILED"]:
-            log(f"TERMINAL: {status}")
-            return 0 if status == "SUCCESS" else 2
+        retry_count += 1
+        log(f"PATCHING (noop) → TESTING (retry {retry_count})")
 
-        if status == "INIT":
-            log("INIT → GENERATING")
-            state["status"] = "GENERATING"
-            save_state(state)
-            continue
-
-        if status == "GENERATING":
-            log("GENERATING → TESTING (v0 no generation)")
-            state["status"] = "TESTING"
-            save_state(state)
-            continue
-
-        if status == "TESTING":
-            log("TESTING...")
-            passed, output = run_tests()
-            state["last_test_output"] = output
-            state["updated_at"] = time.time()
-
-            if passed:
-                state["status"] = "SUCCESS"
-                state["stop_reason"] = "TESTS_PASSED"
-                save_state(state)
-                log("SUCCESS: tests passed")
-                continue
-
-            if state["retry_count"] >= state["max_retries"]:
-                state["status"] = "FAILED"
-                state["stop_reason"] = "MAX_RETRIES_EXHAUSTED"
-                save_state(state)
-                log("FAILED: max retries reached")
-                continue
-
-            state["status"] = "PATCHING"
-            save_state(state)
-            continue
-
-        if status == "PATCHING":
-            state["retry_count"] += 1
-            state["status"] = "TESTING"
-            save_state(state)
-            log(f"PATCHING (noop) → TESTING (retry {state['retry_count']})")
-            continue
+    state.update({
+        "status": "FAILED",
+        "retry_count": retry_count,
+        "stop_reason": "MAX_RETRIES_EXHAUSTED",
+        "updated_at": time.time(),
+    })
+    save_state(state)
+    log("TERMINAL: FAILED")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["run", "status"])
-    args = parser.parse_args()
-
-    if args.command == "status":
-        print(json.dumps(load_state(), indent=2))
-        return 0
-
-    if args.command == "run":
-        return run_loop()
+def status():
+    print(json.dumps(load_state(), indent=2))
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
-        print("\nInterrupted. State preserved.")
-        sys.exit(130)
-    except Exception:
-        print("Fatal error:")
-        print(traceback.format_exc())
-        sys.exit(1)
+    if len(sys.argv) < 2:
+        print("Usage: python main.py [run|status]")
+    elif sys.argv[1] == "run":
+        run()
+    elif sys.argv[1] == "status":
+        status()

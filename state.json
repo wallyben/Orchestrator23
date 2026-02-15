@@ -1,8 +1,5 @@
 {
   "status": "SUCCESS",
   "retry_count": 0,
-  "max_retries": 5,
-  "last_test_output": ".                                                                        [100%]\n1 passed in 0.12s",
-  "stop_reason": "TESTS_PASSED",
-  "updated_at": 1771183766.8462155
+  "updated_at": 1771184850.5739486
 }
