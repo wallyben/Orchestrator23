@@ -3,6 +3,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+MAX_RETRIES_HARD_CAP = 50
+MIN_TIMEOUT_SECONDS = 5
+MAX_TIMEOUT_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class Config:
@@ -27,6 +31,25 @@ class Config:
             )
         if self.max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if self.max_retries > MAX_RETRIES_HARD_CAP:
+            raise ValueError(
+                f"max_retries={self.max_retries} exceeds hard cap of {MAX_RETRIES_HARD_CAP}"
+            )
+        if not (MIN_TIMEOUT_SECONDS <= self.api_timeout <= MAX_TIMEOUT_SECONDS):
+            raise ValueError(
+                f"api_timeout must be between {MIN_TIMEOUT_SECONDS} and {MAX_TIMEOUT_SECONDS}, "
+                f"got {self.api_timeout}"
+            )
+        if not (MIN_TIMEOUT_SECONDS <= self.test_timeout <= MAX_TIMEOUT_SECONDS):
+            raise ValueError(
+                f"test_timeout must be between {MIN_TIMEOUT_SECONDS} and {MAX_TIMEOUT_SECONDS}, "
+                f"got {self.test_timeout}"
+            )
+        ws = os.path.abspath(self.workspace_path)
+        if ws in ("/", os.path.expanduser("~")):
+            raise ValueError(
+                f"workspace_path must not be root or home directory, got: {ws}"
+            )
 
 
 BASE_DIR = Path(__file__).parent.resolve()
@@ -71,7 +94,7 @@ def load_config(argv=None) -> Config:
         "--max-retries",
         type=int,
         default=DEFAULTS["max_retries"],
-        help="Maximum number of patch retries after initial generation",
+        help=f"Maximum number of patch retries (hard cap: {MAX_RETRIES_HARD_CAP})",
     )
     parser.add_argument(
         "--model",

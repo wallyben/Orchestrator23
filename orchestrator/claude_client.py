@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 
@@ -11,6 +12,9 @@ FILE_BLOCK_PATTERN = re.compile(
     r"===== FILE:\s*(.+?)\s*=====\n(.*?)(?=\n===== FILE:|\n===== END =====|$)",
     re.DOTALL,
 )
+
+MAX_SINGLE_FILE_BYTES = 512 * 1024
+MAX_TOTAL_FILES = 100
 
 SYSTEM_PROMPT = """\
 You are a senior software engineer. You generate complete, production-ready Python project files.
@@ -70,17 +74,39 @@ def _format_files_block(files: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
+def _sanitize_path(filepath: str) -> str | None:
+    filepath = filepath.strip()
+    filepath = filepath.lstrip("/")
+    while filepath.startswith("./"):
+        filepath = filepath[2:]
+    normalized = os.path.normpath(filepath)
+    if normalized.startswith("..") or normalized.startswith(os.sep):
+        return None
+    if "\x00" in normalized:
+        return None
+    return normalized
+
+
 def _parse_files(text: str) -> dict[str, str]:
     files = {}
     for match in FILE_BLOCK_PATTERN.finditer(text):
-        filepath = match.group(1).strip()
+        raw_path = match.group(1).strip()
         content = match.group(2)
         if content.endswith("\n===== END"):
             content = content[: -len("\n===== END")]
         content = content.strip("\n") + "\n"
-        filepath = filepath.lstrip("/").lstrip("./")
-        if filepath:
-            files[filepath] = content
+
+        filepath = _sanitize_path(raw_path)
+        if filepath is None:
+            continue
+        if not filepath:
+            continue
+        if len(content.encode("utf-8", errors="replace")) > MAX_SINGLE_FILE_BYTES:
+            continue
+        if len(files) >= MAX_TOTAL_FILES:
+            break
+
+        files[filepath] = content
     return files
 
 
@@ -109,7 +135,7 @@ class ClaudeClient:
 
     def _call(self, user_prompt: str, operation: str) -> dict[str, str]:
         self._logger.info(
-            f"claude_api_call_start",
+            "claude_api_call_start",
             {"operation": operation, "prompt_length": len(user_prompt)},
         )
 
@@ -124,19 +150,47 @@ class ClaudeClient:
             )
         except anthropic.APITimeoutError:
             self._logger.error("claude_api_timeout", {"operation": operation})
-            raise RuntimeError(f"Claude API timed out after {self._config.api_timeout}s")
-        except anthropic.APIError as e:
-            self._logger.error(
-                "claude_api_error",
-                {"operation": operation, "error": str(e), "status": getattr(e, "status_code", None)},
+            raise RuntimeError(
+                f"Claude API timed out after {self._config.api_timeout}s"
             )
-            raise RuntimeError(f"Claude API error: {e}")
+        except anthropic.APIConnectionError as e:
+            self._logger.error(
+                "claude_api_connection_error",
+                {"operation": operation, "error": str(e)},
+            )
+            raise RuntimeError(f"Claude API connection failed: {e}")
+        except anthropic.RateLimitError as e:
+            self._logger.error(
+                "claude_api_rate_limit",
+                {"operation": operation, "error": str(e)},
+            )
+            raise RuntimeError(f"Claude API rate limited: {e}")
+        except anthropic.APIStatusError as e:
+            self._logger.error(
+                "claude_api_status_error",
+                {
+                    "operation": operation,
+                    "error": str(e),
+                    "status": e.status_code,
+                },
+            )
+            raise RuntimeError(f"Claude API error (HTTP {e.status_code}): {e}")
+        except Exception as e:
+            self._logger.error(
+                "claude_api_unexpected_error",
+                {"operation": operation, "error": str(e), "type": type(e).__name__},
+            )
+            raise RuntimeError(f"Unexpected error calling Claude API: {e}")
 
         elapsed = time.monotonic() - start
 
+        if not response.content:
+            self._logger.error("claude_api_empty_response", {"operation": operation})
+            raise RuntimeError("Claude returned an empty response with no content blocks")
+
         raw_text = ""
         for block in response.content:
-            if block.type == "text":
+            if hasattr(block, "type") and block.type == "text":
                 raw_text += block.text
 
         self._logger.info(
@@ -165,7 +219,11 @@ class ClaudeClient:
 
         self._logger.info(
             "claude_files_parsed",
-            {"operation": operation, "file_count": len(files), "files": list(files.keys())},
+            {
+                "operation": operation,
+                "file_count": len(files),
+                "files": list(files.keys()),
+            },
         )
 
         return files
