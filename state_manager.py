@@ -172,11 +172,7 @@ def fail(state, stop_reason, error_message=None):
     *stop_reason* must be a key from STOP_REASONS.
     *error_message* is the raw error string stored in last_error.
     """
-    if stop_reason not in STOP_REASONS:
-        stop_reason_display = stop_reason
-    else:
-        stop_reason_display = stop_reason
-    state["stop_reason"] = stop_reason_display
+    state["stop_reason"] = stop_reason
     state["last_error"] = error_message or STOP_REASONS.get(stop_reason, stop_reason)
     _write_atomic(state)
     transition(state, "FAILED")
