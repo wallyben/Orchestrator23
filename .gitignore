@@ -1,0 +1,8 @@
+﻿venv/
+__pycache__/
+*.pyc
+state.json
+logs/
+workspace/__pycache__/
+workspace/app/__pycache__/
+workspace/tests/__pycache__/
