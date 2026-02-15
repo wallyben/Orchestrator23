@@ -45,10 +45,10 @@ No other directories. No `src/`. No `lib/`. No `utils/`. No `config/`. Flat modu
 
 ## 2. State Machine
 
-Five states. No ambiguity. No parallel paths.
+Six states. No ambiguity. No parallel paths.
 
 ```
-INIT → GENERATING → TESTING → PATCHING → DONE
+INIT → GENERATING → TESTING → PATCHING → SUCCESS
                                   │
                                   └──→ FAILED
 ```
@@ -59,9 +59,9 @@ INIT → GENERATING → TESTING → PATCHING → DONE
 |---|---|---|
 | `INIT` | Spec loaded, workspace clean, ready to begin | `GENERATING` |
 | `GENERATING` | Code generation in progress | `TESTING`, `FAILED` |
-| `TESTING` | Running test suite against workspace | `DONE`, `PATCHING`, `FAILED` |
+| `TESTING` | Running test suite against workspace | `SUCCESS`, `PATCHING`, `FAILED` |
 | `PATCHING` | Applying fix based on test failure output | `TESTING`, `FAILED` |
-| `DONE` | All tests passed. Terminal state. | _(none)_ |
+| `SUCCESS` | All tests passed. Terminal state. | _(none)_ |
 | `FAILED` | Max retries exhausted or unrecoverable error. Terminal state. | _(none)_ |
 
 ### State transitions (exhaustive)
@@ -70,7 +70,7 @@ INIT → GENERATING → TESTING → PATCHING → DONE
 INIT        → GENERATING     : always (start of run)
 GENERATING  → TESTING        : generation succeeded
 GENERATING  → FAILED         : generation produced no output or errored
-TESTING     → DONE           : all tests pass (exit code 0)
+TESTING     → SUCCESS        : all tests pass (exit code 0)
 TESTING     → PATCHING       : tests fail AND retry_count < max_retries
 TESTING     → FAILED         : tests fail AND retry_count >= max_retries
 PATCHING    → TESTING        : patch applied, re-run tests (retry_count++)
@@ -108,7 +108,7 @@ The engine runs exactly this loop. No deviation.
 function run(spec_file, max_retries):
     state = load_or_init(spec_file, max_retries)
 
-    if state.state == DONE or state.state == FAILED:
+    if state.state == SUCCESS or state.state == FAILED:
         print result and exit
 
     if state.state == INIT:
@@ -127,7 +127,7 @@ function run(spec_file, max_retries):
     while state.state == TESTING:
         exit_code, stdout, stderr = run_tests(workspace/)
         if exit_code == 0:
-            transition(DONE)
+            transition(SUCCESS)
             stop
 
         if state.retry_count >= state.max_retries:
@@ -191,7 +191,7 @@ The orchestrator halts when **any** of these are true:
 
 | # | Condition | Resulting state | Exit code |
 |---|---|---|---|
-| 1 | All tests pass (exit code 0) | `DONE` | 0 |
+| 1 | All tests pass (exit code 0) | `SUCCESS` | 0 |
 | 2 | `retry_count >= max_retries` after a test failure | `FAILED` | 1 |
 | 3 | Code generation produces no output | `FAILED` | 1 |
 | 4 | Code generation errors (exception/crash) | `FAILED` | 1 |

@@ -35,9 +35,9 @@ LOGS_DIR = os.path.join(BASE_DIR, "logs")
 TRANSITIONS = {
     "INIT":       {"GENERATING"},
     "GENERATING": {"TESTING", "FAILED"},
-    "TESTING":    {"DONE", "PATCHING", "FAILED"},
+    "TESTING":    {"SUCCESS", "PATCHING", "FAILED"},
     "PATCHING":   {"TESTING", "FAILED"},
-    "DONE":       set(),
+    "SUCCESS":    set(),
     "FAILED":     set(),
 }
 
@@ -231,9 +231,9 @@ def run_engine(spec_file, max_retries):
 
     if state is not None:
         # Resume path
-        if state["state"] in {"DONE", "FAILED"}:
+        if state["state"] in {"SUCCESS", "FAILED"}:
             banner(state["state"])
-            if state["state"] == "DONE":
+            if state["state"] == "SUCCESS":
                 info("Run already completed.  All tests passed.")
                 return 0
             info(f"Run already failed: {state['last_error']}")
@@ -276,28 +276,18 @@ def run_engine(spec_file, max_retries):
         banner("GENERATING")
         rlog.write("Generating code from spec")
 
-        try:
-            files = claude_client.generate(spec, WORKSPACE_DIR)
-        except Exception as exc:
-            err(f"Generation failed: {exc}")
-            rlog.write(f"Generation error: {exc}")
-            state["last_error"] = f"Generation failed: {exc}"
-            save_state(state)
-            transition(state, "FAILED")
-            rlog.close()
-            return 1
-
-        if not files:
-            err("Generation produced no output")
-            rlog.write("Generation produced no output")
-            state["last_error"] = "Generation produced no output"
+        result = claude_client.generate(spec, WORKSPACE_DIR)
+        if not result.ok:
+            err(f"Generation failed: {result.error}")
+            rlog.write(f"Generation error: {result.error}")
+            state["last_error"] = f"Generation failed: {result.error}"
             save_state(state)
             transition(state, "FAILED")
             rlog.close()
             return 1
 
         try:
-            written = write_files(files)
+            written = write_files(result.files)
             for path in written:
                 info(f"  wrote: {path}")
             rlog.write(f"Generated {len(written)} file(s): {written}")
@@ -353,9 +343,9 @@ def run_engine(spec_file, max_retries):
 
         # ---- tests passed ----
         if exit_code == 0:
-            banner("DONE", "All tests passed")
+            banner("SUCCESS", "All tests passed")
             rlog.write("Tests passed")
-            transition(state, "DONE")
+            transition(state, "SUCCESS")
             rlog.close()
             return 0
 
@@ -381,28 +371,18 @@ def run_engine(spec_file, max_retries):
         banner("PATCHING", f"retry {state['retry_count'] + 1}/{state['max_retries']}")
         rlog.write("Calling claude_client.patch")
 
-        try:
-            patch_files = claude_client.patch(spec, stderr, WORKSPACE_DIR)
-        except Exception as exc:
-            err(f"Patch failed: {exc}")
-            rlog.write(f"Patch error: {exc}")
-            state["last_error"] = f"Patch failed: {exc}"
-            save_state(state)
-            transition(state, "FAILED")
-            rlog.close()
-            return 1
-
-        if not patch_files:
-            err("Patch produced no changes")
-            rlog.write("Patch produced no changes")
-            state["last_error"] = "Patch produced no changes"
+        result = claude_client.patch(spec, stderr, WORKSPACE_DIR)
+        if not result.ok:
+            err(f"Patch failed: {result.error}")
+            rlog.write(f"Patch error: {result.error}")
+            state["last_error"] = f"Patch failed: {result.error}"
             save_state(state)
             transition(state, "FAILED")
             rlog.close()
             return 1
 
         try:
-            written = write_files(patch_files)
+            written = write_files(result.files)
             for path in written:
                 info(f"  patched: {path}")
             rlog.write(f"Patched {len(written)} file(s): {written}")
