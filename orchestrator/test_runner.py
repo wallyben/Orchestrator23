@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from config import Config
 from logger import Logger
+from tool_registry import ToolResult
 
 MAX_OUTPUT_BYTES = 64 * 1024
 
@@ -21,6 +22,19 @@ class TestRunner:
     def __init__(self, config: Config, logger: Logger):
         self._config = config
         self._logger = logger
+
+    @property
+    def name(self) -> str:
+        return "pytest"
+
+    def run(self) -> ToolResult:
+        result = self.run_tests()
+        return ToolResult(
+            tool_name=self.name,
+            passed=result.passed,
+            output=result.output,
+            return_code=result.return_code,
+        )
 
     def run_tests(self) -> TestResult:
         workspace = self._config.workspace_path

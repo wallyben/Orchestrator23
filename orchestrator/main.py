@@ -30,6 +30,7 @@ from state_manager import (
     compute_spec_hash,
 )
 from test_runner import TestRunner
+from tool_registry import ToolRegistry
 
 _shutdown_requested = False
 
@@ -155,8 +156,11 @@ def run(argv=None) -> int:
     client = ClaudeClient(config, logger)
     runner = TestRunner(config, logger)
 
+    registry = ToolRegistry(logger)
+    registry.register(runner)
+
     try:
-        exit_code = _loop(state_mgr, client, runner, spec, config, logger)
+        exit_code = _loop(state_mgr, client, registry, spec, config, logger)
     except KeyboardInterrupt:
         logger.warn("interrupted_by_user")
         print("\nInterrupted. State saved. Resume with --resume.", file=sys.stderr)
@@ -186,7 +190,7 @@ def _check_shutdown(logger: Logger):
 def _loop(
     state_mgr: StateManager,
     client: ClaudeClient,
-    runner: TestRunner,
+    registry: ToolRegistry,
     spec: str,
     config: Config,
     logger: Logger,
@@ -291,18 +295,29 @@ def _loop(
             )
             continue
 
-        # --- TEST ---
+        # --- TEST (run all registered tools) ---
         if phase == PHASE_GENERATED:
             _check_shutdown(logger)
 
-            print(f"  Running tests...", file=sys.stderr)
-            logger.info("testing", {"attempt": attempt})
+            tool_names = registry.tool_names
+            print(
+                f"  Running tools: {', '.join(tool_names)}...",
+                file=sys.stderr,
+            )
+            logger.info("testing", {"attempt": attempt, "tools": tool_names})
             state_mgr.update(phase=PHASE_TESTING)
-            result = runner.run_tests()
+
+            results = registry.run_all()
+            all_passed = all(r.passed for r in results)
+            combined_output = "\n".join(
+                f"--- [{r.tool_name}] (rc={r.return_code}) ---\n{r.output}"
+                for r in results
+            )
+
             state_mgr.update(
                 phase=PHASE_TESTED,
-                test_passed=result.passed,
-                last_test_output=result.output,
+                test_passed=all_passed,
+                last_test_output=combined_output,
             )
             continue
 

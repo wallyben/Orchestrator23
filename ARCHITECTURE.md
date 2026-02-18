@@ -6,7 +6,8 @@
 /orchestrator
 ├── main.py              # CLI entry point, retry loop owner
 ├── claude_client.py     # LLM interface — sends prompts, receives code/patches
-├── test_runner.py       # Runs pytest against /workspace, captures output
+├── test_runner.py       # Runs pytest against /workspace, implements Tool protocol
+├── tool_registry.py     # Tool protocol, ToolResult, and ToolRegistry
 ├── state_manager.py     # Reads/writes state.json, handles resume
 ├── logger.py            # Structured logging to /logs/<run_id>.log
 ├── config.py            # Static config: max retries, paths, model params
@@ -18,7 +19,7 @@
     └── (generated)
 ```
 
-No nested packages. No `__init__.py`. Seven Python files. Flat.
+No nested packages. No `__init__.py`. Eight Python files. Flat.
 
 ---
 
@@ -36,8 +37,10 @@ No nested packages. No `__init__.py`. Seven Python files. Flat.
 └────────┬──────────┬──────────┬──────────┬───────────┘
          │          │          │          │
          ▼          ▼          ▼          ▼
-   claude_client  test_runner  state_mgr  logger
-   .py            .py          .py        .py
+   claude_client  tool_registry  state_mgr  logger
+   .py            .py            .py        .py
+                    │
+                test_runner.py
 ```
 
 **Dependency graph (strictly one-directional):**
@@ -48,10 +51,11 @@ main.py
  ├── logger.py          (imported by all except config)
  ├── state_manager.py   (imports config, logger)
  ├── claude_client.py   (imports config, logger)
- └── test_runner.py     (imports config, logger)
+ ├── tool_registry.py   (imports logger)
+ └── test_runner.py     (imports config, logger, tool_registry)
 ```
 
-No circular imports. No abstract base classes. No registries.
+No circular imports. No abstract base classes.
 
 ### Module Responsibilities
 
@@ -61,8 +65,9 @@ No circular imports. No abstract base classes. No registries.
 | `logger.py` | Creates a per-run log file at `/logs/<run_id>.log`. Provides `log(level, message, data)`. Writes JSON lines. Timestamps are UTC ISO-8601. |
 | `state_manager.py` | Loads `state.json` on start. Writes after every state transition. Provides `get_state()`, `update_state()`, `mark_complete()`, `mark_failed()`. State file is the crash-recovery mechanism. |
 | `claude_client.py` | Builds prompts. Calls the Anthropic API (via `anthropic` Python SDK). Two entry points: `generate_project(spec)` returns file contents, `generate_patch(spec, files, test_output)` returns file diffs/replacements. Parses structured output into a dict of `{filepath: content}`. |
-| `test_runner.py` | Runs `pytest /workspace` as a subprocess. Captures stdout+stderr. Returns `(passed: bool, output: str, return_code: int)`. Timeout-kills after configurable seconds. |
-| `main.py` | CLI entry. Parses args. Orchestrates the loop. Nothing else. |
+| `tool_registry.py` | Defines the `Tool` protocol (`name` property + `run()` → `ToolResult`), the `ToolResult` frozen dataclass, and the `ToolRegistry` class. Registry runs all tools in registration order, catches exceptions per-tool, and returns a list of `ToolResult`. |
+| `test_runner.py` | Runs `pytest /workspace` as a subprocess. Implements the `Tool` protocol (name=`"pytest"`). Captures stdout+stderr. Timeout-kills after configurable seconds. |
+| `main.py` | CLI entry. Parses args. Creates `ToolRegistry`, registers tools, orchestrates the generate → run_all → evaluate loop. |
 
 ---
 
