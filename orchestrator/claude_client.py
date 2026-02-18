@@ -1,10 +1,8 @@
-import json
 import os
 import re
 import time
 
-import anthropic
-
+from adapters.base import LLMAdapter
 from config import Config
 from logger import Logger
 
@@ -111,13 +109,10 @@ def _parse_files(text: str) -> dict[str, str]:
 
 
 class ClaudeClient:
-    def __init__(self, config: Config, logger: Logger):
+    def __init__(self, config: Config, logger: Logger, adapter: LLMAdapter):
         self._config = config
         self._logger = logger
-        self._client = anthropic.Anthropic(
-            api_key=config.api_key,
-            timeout=float(config.api_timeout),
-        )
+        self._adapter = adapter
 
     def generate_project(self, spec: str) -> dict[str, str]:
         prompt = GENERATE_PROMPT_TEMPLATE.format(spec=spec)
@@ -135,73 +130,36 @@ class ClaudeClient:
 
     def _call(self, user_prompt: str, operation: str) -> dict[str, str]:
         self._logger.info(
-            "claude_api_call_start",
+            "llm_call_start",
             {"operation": operation, "prompt_length": len(user_prompt)},
         )
 
         start = time.monotonic()
 
         try:
-            response = self._client.messages.create(
-                model=self._config.model_name,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
+            result = self._adapter.generate(
                 messages=[{"role": "user", "content": user_prompt}],
+                system=SYSTEM_PROMPT,
+                max_tokens=16000,
             )
-        except anthropic.APITimeoutError:
-            self._logger.error("claude_api_timeout", {"operation": operation})
-            raise RuntimeError(
-                f"Claude API timed out after {self._config.api_timeout}s"
-            )
-        except anthropic.APIConnectionError as e:
-            self._logger.error(
-                "claude_api_connection_error",
-                {"operation": operation, "error": str(e)},
-            )
-            raise RuntimeError(f"Claude API connection failed: {e}")
-        except anthropic.RateLimitError as e:
-            self._logger.error(
-                "claude_api_rate_limit",
-                {"operation": operation, "error": str(e)},
-            )
-            raise RuntimeError(f"Claude API rate limited: {e}")
-        except anthropic.APIStatusError as e:
-            self._logger.error(
-                "claude_api_status_error",
-                {
-                    "operation": operation,
-                    "error": str(e),
-                    "status": e.status_code,
-                },
-            )
-            raise RuntimeError(f"Claude API error (HTTP {e.status_code}): {e}")
+        except RuntimeError:
+            raise
         except Exception as e:
-            self._logger.error(
-                "claude_api_unexpected_error",
-                {"operation": operation, "error": str(e), "type": type(e).__name__},
-            )
-            raise RuntimeError(f"Unexpected error calling Claude API: {e}")
+            raise RuntimeError(f"Adapter error: {e}")
 
         elapsed = time.monotonic() - start
-
-        if not response.content:
-            self._logger.error("claude_api_empty_response", {"operation": operation})
-            raise RuntimeError("Claude returned an empty response with no content blocks")
-
-        raw_text = ""
-        for block in response.content:
-            if hasattr(block, "type") and block.type == "text":
-                raw_text += block.text
+        raw_text = result.get("text", "")
+        usage = result.get("usage", {})
 
         self._logger.info(
-            "claude_api_call_done",
+            "llm_call_done",
             {
                 "operation": operation,
                 "elapsed_s": round(elapsed, 2),
                 "response_length": len(raw_text),
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-                "stop_reason": response.stop_reason,
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "stop_reason": result.get("stop_reason", ""),
             },
         )
 
@@ -209,16 +167,16 @@ class ClaudeClient:
 
         if not files:
             self._logger.error(
-                "claude_parse_no_files",
+                "llm_parse_no_files",
                 {"operation": operation, "raw_text_head": raw_text[:500]},
             )
             raise RuntimeError(
-                "Claude returned a response but no files could be parsed. "
+                "LLM returned a response but no files could be parsed. "
                 "The model may not have followed the expected output format."
             )
 
         self._logger.info(
-            "claude_files_parsed",
+            "llm_files_parsed",
             {
                 "operation": operation,
                 "file_count": len(files),

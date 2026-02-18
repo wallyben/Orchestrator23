@@ -13,6 +13,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
+from adapters import create_adapter
 from claude_client import ClaudeClient
 from config import Config, MAX_RETRIES_HARD_CAP, load_config
 from logger import Logger
@@ -153,7 +154,15 @@ def run(argv=None) -> int:
         state = state_mgr.create_fresh(run_id, config.max_retries, spec_hash)
         logger.info("fresh_run", {"run_id": run_id, "max_retries": config.max_retries})
 
-    client = ClaudeClient(config, logger)
+    adapter = create_adapter(
+        name=config.adapter_name,
+        api_key=config.api_key,
+        model=config.model_name,
+        timeout=config.api_timeout,
+    )
+    logger.info("adapter_created", {"adapter": config.adapter_name, "model": config.model_name})
+
+    client = ClaudeClient(config, logger, adapter)
     runner = TestRunner(config, logger)
 
     registry = ToolRegistry(logger)
