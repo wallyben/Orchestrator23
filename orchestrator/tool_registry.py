@@ -34,6 +34,10 @@ class ToolRegistry:
     def __init__(self, logger: Logger):
         self._tools: dict[str, Tool] = {}
         self._logger = logger
+        self._on_run_hook: callable | None = None
+
+    def set_on_run_hook(self, hook: callable) -> None:
+        self._on_run_hook = hook
 
     def register(self, tool: Tool) -> None:
         if not isinstance(tool, Tool):
@@ -51,6 +55,11 @@ class ToolRegistry:
         return self._tools[name]
 
     def run_all(self) -> list[ToolResult]:
+        if self._on_run_hook is not None:
+            try:
+                self._on_run_hook(list(self._tools.keys()))
+            except Exception:
+                pass
         results: list[ToolResult] = []
         for tool in self._tools.values():
             self._logger.info("tool_run_start", {"name": tool.name})

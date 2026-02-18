@@ -11,12 +11,12 @@ import shutil
 import signal
 import sys
 import tempfile
-from datetime import datetime, timezone
 
 from adapters import create_adapter
 from claude_client import ClaudeClient
 from config import Config, MAX_RETRIES_HARD_CAP, load_config
 from logger import Logger
+from run_log import RunLog, new_run_id
 from state_manager import (
     PHASE_FAILED,
     PHASE_GENERATED,
@@ -42,7 +42,7 @@ def _handle_signal(signum, frame):
 
 
 def generate_run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return new_run_id()
 
 
 def read_spec(spec_path: str) -> str:
@@ -162,14 +162,22 @@ def run(argv=None) -> int:
     )
     logger.info("adapter_created", {"adapter": config.adapter_name, "model": config.model_name})
 
+    run_log = RunLog(
+        run_id=run_id,
+        model_name=config.model_name,
+        adapter_name=config.adapter_name,
+        logs_path=config.logs_path,
+    )
+
     client = ClaudeClient(config, logger, adapter)
     runner = TestRunner(config, logger)
 
     registry = ToolRegistry(logger)
     registry.register(runner)
+    registry.set_on_run_hook(run_log.record_tool_calls)
 
     try:
-        exit_code = _loop(state_mgr, client, registry, spec, config, logger)
+        exit_code = _loop(state_mgr, client, registry, spec, config, logger, run_log)
     except KeyboardInterrupt:
         logger.warn("interrupted_by_user")
         print("\nInterrupted. State saved. Resume with --resume.", file=sys.stderr)
@@ -183,6 +191,10 @@ def run(argv=None) -> int:
         print("State saved. Resume with --resume.", file=sys.stderr)
         exit_code = 2
     finally:
+        final = state_mgr.get().get("phase", "unknown")
+        run_log.set_retry_count(state_mgr.get().get("attempt", 0))
+        run_log.finalize(final)
+        run_log.write()
         logger.close()
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
@@ -203,7 +215,14 @@ def _loop(
     spec: str,
     config: Config,
     logger: Logger,
+    run_log: RunLog,
 ) -> int:
+
+    def _transition(from_phase: str, **kwargs):
+        state_mgr.update(**kwargs)
+        to_phase = kwargs.get("phase")
+        if to_phase is not None and to_phase != from_phase:
+            run_log.record_transition(from_phase, to_phase)
 
     absolute_max_iterations = config.max_retries + 10
     iteration = 0
@@ -216,7 +235,7 @@ def _loop(
                 {"iteration": iteration, "limit": absolute_max_iterations},
             )
             try:
-                state_mgr.update(phase=PHASE_FAILED)
+                _transition(phase, phase=PHASE_FAILED)
             except ValueError:
                 pass
             print(
@@ -239,7 +258,7 @@ def _loop(
                 "max_retries_exceeded",
                 {"attempt": attempt, "max_retries": config.max_retries},
             )
-            state_mgr.update(phase=PHASE_FAILED)
+            _transition(phase, phase=PHASE_FAILED)
             print(
                 f"\nFAILED — max retries ({config.max_retries}) exceeded.",
                 file=sys.stderr,
@@ -250,15 +269,15 @@ def _loop(
         if phase in (PHASE_GENERATING, PHASE_PATCHING):
             logger.warn("resume_from_interrupted_generation", {"phase": phase})
             if attempt == 0:
-                state_mgr.update(phase=PHASE_INIT)
+                _transition(phase, phase=PHASE_INIT)
             else:
-                state_mgr.update(phase=PHASE_TESTED)
+                _transition(phase, phase=PHASE_TESTED)
             continue
 
         # --- RESUME RECOVERY: interrupted mid-testing ---
         if phase == PHASE_TESTING:
             logger.warn("resume_from_interrupted_testing")
-            state_mgr.update(phase=PHASE_GENERATED)
+            _transition(phase, phase=PHASE_GENERATED)
             continue
 
         # --- GENERATE or PATCH ---
@@ -271,12 +290,12 @@ def _loop(
                     file=sys.stderr,
                 )
                 logger.info("generating_initial", {"attempt": attempt})
-                state_mgr.update(phase=PHASE_GENERATING)
+                _transition(phase, phase=PHASE_GENERATING)
                 try:
                     files = client.generate_project(spec)
                 except RuntimeError as e:
                     logger.error("generation_failed", {"error": str(e)})
-                    state_mgr.update(phase=PHASE_FAILED)
+                    _transition(PHASE_GENERATING, phase=PHASE_FAILED)
                     print(f"\nFAILED — generation error: {e}", file=sys.stderr)
                     return 1
             else:
@@ -285,7 +304,7 @@ def _loop(
                     file=sys.stderr,
                 )
                 logger.info("patching", {"attempt": attempt})
-                state_mgr.update(phase=PHASE_PATCHING)
+                _transition(phase, phase=PHASE_PATCHING)
                 workspace_files = read_workspace_files(config.workspace_path)
                 try:
                     files = client.generate_patch(
@@ -293,15 +312,13 @@ def _loop(
                     )
                 except RuntimeError as e:
                     logger.error("patch_failed", {"error": str(e)})
-                    state_mgr.update(phase=PHASE_FAILED)
+                    _transition(PHASE_PATCHING, phase=PHASE_FAILED)
                     print(f"\nFAILED — patch error: {e}", file=sys.stderr)
                     return 1
 
             write_workspace_files(config.workspace_path, files, logger)
-            state_mgr.update(
-                phase=PHASE_GENERATED,
-                attempt_files=list(files.keys()),
-            )
+            cur = state_mgr.get()["phase"]
+            _transition(cur, phase=PHASE_GENERATED, attempt_files=list(files.keys()))
             continue
 
         # --- TEST (run all registered tools) ---
@@ -314,7 +331,7 @@ def _loop(
                 file=sys.stderr,
             )
             logger.info("testing", {"attempt": attempt, "tools": tool_names})
-            state_mgr.update(phase=PHASE_TESTING)
+            _transition(phase, phase=PHASE_TESTING)
 
             results = registry.run_all()
             all_passed = all(r.passed for r in results)
@@ -323,23 +340,21 @@ def _loop(
                 for r in results
             )
 
-            state_mgr.update(
-                phase=PHASE_TESTED,
-                test_passed=all_passed,
-                last_test_output=combined_output,
-            )
+            _transition(PHASE_TESTING, phase=PHASE_TESTED,
+                         test_passed=all_passed, last_test_output=combined_output)
             continue
 
         # --- EVALUATE ---
         if phase == PHASE_TESTED:
             if state["test_passed"]:
-                state_mgr.update(phase=PHASE_SUCCESS)
+                _transition(phase, phase=PHASE_SUCCESS)
                 print(
                     f"\nSUCCESS — all tests passed on attempt {attempt}.",
                     file=sys.stderr,
                 )
                 return 0
             else:
+                run_log.record_validation_failure()
                 logger.warn(
                     "tests_failed",
                     {
