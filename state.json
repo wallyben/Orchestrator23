@@ -1,5 +1,6 @@
 {
-  "status": "SUCCESS",
-  "retry_count": 0,
-  "updated_at": 1771184850.5739486
+  "job": {
+    "file": "jobs/test_job.json",
+    "current_step": 1
+  }
 }

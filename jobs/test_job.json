@@ -1,0 +1,13 @@
+{
+  "job_id": "test_job",
+  "steps": [
+    {
+      "id": "01_create_file",
+      "prompt": "Create workspace/app/hello.py with a function hello() that returns 'hello world'.",
+      "verify": {
+        "cmd": "python -c \"from app.hello import hello; assert hello()=='hello world'\"",
+        "cwd": "workspace"
+      }
+    }
+  ]
+}
