@@ -107,8 +107,19 @@ def status():
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py [run|status]")
+        print("Usage: python main.py [run|status|job <jobfile>]")
     elif sys.argv[1] == "run":
         run()
     elif sys.argv[1] == "status":
         status()
+    elif sys.argv[1] == "job":
+        if len(sys.argv) < 3:
+            print("Usage: python main.py job <jobfile>")
+            sys.exit(1)
+        from job_runner import run_job
+        success = run_job(sys.argv[2])
+        sys.exit(0 if success else 1)
+    else:
+        print(f"Unknown command: {sys.argv[1]}")
+        print("Usage: python main.py [run|status|job <jobfile>]")
+        sys.exit(1)
